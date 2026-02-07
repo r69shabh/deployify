@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AuthManager, createPkcePair } from "../auth/authManager";
+import { ResolvedOAuthConfig, resolveOAuthConfig } from "../auth/oauthClientRegistry";
 import {
   DeploymentDetails,
   DeploymentProviderAdapter,
@@ -106,43 +107,98 @@ export class VercelAdapter implements DeploymentProviderAdapter {
   public readonly displayName = "Vercel";
 
   private readonly authManager: AuthManager;
+  private readonly extensionId: string;
 
-  public constructor(authManager: AuthManager) {
+  public constructor(authManager: AuthManager, extensionId: string) {
     this.authManager = authManager;
+    this.extensionId = extensionId;
   }
 
   public async authenticate() {
-    const configuration = vscode.workspace.getConfiguration("deployify.providers.vercel");
-    const authMode = configuration.get<"oauth" | "token">("authMode", "oauth");
-
-    if (authMode === "token") {
-      return this.authManager.beginDeviceLikeLogin(
-        this.id,
-        "https://vercel.com/account/tokens",
-        "Paste your Vercel token"
-      );
+    const oauth = resolveOAuthConfig(this.extensionId, this.id);
+    if (!oauth) {
+      throw new Error("Vercel sign-in is not enabled in this build yet.");
     }
 
-    const clientId = configuration.get<string>("oauthClientId", "").trim();
-    const clientSecret = configuration.get<string>("oauthClientSecret", "").trim();
-    const scope = configuration.get<string>("oauthScopes", "project.read deployments.read").trim();
-
-    if (!clientId) {
-      throw new Error(
-        "Set deployify.providers.vercel.oauthClientId in settings before connecting Vercel with OAuth."
-      );
+    if (oauth.strategy === "broker") {
+      return this.authenticateViaBroker(oauth);
     }
 
-    const pkce = createPkcePair();
+    return this.authenticateDirect(oauth);
+  }
+
+  private async authenticateViaBroker(oauth: Extract<ResolvedOAuthConfig, { strategy: "broker" }>) {
     const callback = await this.authManager.beginOAuthFlow({
       provider: this.id,
-      authorizeEndpoint: "https://vercel.com/oauth/authorize",
+      authorizeEndpoint: oauth.startEndpoint,
       authorizeQuery: {
-        response_type: "code",
-        client_id: clientId,
-        scope: scope || undefined,
-        code_challenge: pkce.challenge,
-        code_challenge_method: pkce.method
+        provider: this.id,
+        extension_id: this.extensionId
+      }
+    });
+
+    const directToken = callback.fragmentParams.get("access_token") ?? callback.queryParams.get("access_token");
+    const expiresRaw = callback.fragmentParams.get("expires_in") ?? callback.queryParams.get("expires_in");
+
+    let accessToken = directToken;
+    let expiresInRaw = expiresRaw;
+
+    if (!accessToken) {
+      const brokerCode = callback.queryParams.get("broker_code") ?? callback.queryParams.get("code");
+      if (!brokerCode) {
+        throw new Error("Vercel broker auth callback did not return an access token or broker code.");
+      }
+
+      const exchange = await requestJson<{
+        access_token?: string;
+        expires_in?: number | string;
+        account_label?: string;
+      }>(oauth.exchangeEndpoint, {
+        method: "POST",
+        body: {
+          provider: this.id,
+          broker_code: brokerCode,
+          code: brokerCode,
+          redirect_uri: callback.redirectUri,
+          extension_id: this.extensionId
+        }
+      });
+
+      accessToken = exchange.access_token ?? null;
+      expiresInRaw = exchange.expires_in === undefined ? null : String(exchange.expires_in);
+    }
+
+    if (!accessToken) {
+      throw new Error("Vercel broker auth did not return an access token.");
+    }
+
+    const createdAt = new Date();
+    const expiresIn = expiresInRaw ? Number.parseInt(expiresInRaw, 10) : Number.NaN;
+    const session = {
+      provider: this.id,
+      accessToken,
+      createdAt: createdAt.toISOString(),
+      expiresAt: Number.isFinite(expiresIn)
+        ? new Date(createdAt.getTime() + expiresIn * 1000).toISOString()
+        : undefined
+    };
+
+    await this.authManager.setSession(session);
+    return session;
+  }
+
+  private async authenticateDirect(oauth: Extract<ResolvedOAuthConfig, { strategy: "direct" }>) {
+
+    const pkce = oauth.usePkce ? createPkcePair() : undefined;
+    const callback = await this.authManager.beginOAuthFlow({
+      provider: this.id,
+      authorizeEndpoint: oauth.authorizeEndpoint,
+      authorizeQuery: {
+        response_type: oauth.responseType,
+        client_id: oauth.clientId,
+        scope: oauth.scope || undefined,
+        code_challenge: pkce?.challenge,
+        code_challenge_method: pkce?.method
       }
     });
 
@@ -151,20 +207,24 @@ export class VercelAdapter implements DeploymentProviderAdapter {
       throw new Error("Vercel OAuth callback did not return an authorization code.");
     }
 
+    if (!oauth.tokenEndpoint) {
+      throw new Error("Vercel OAuth token endpoint is not configured in this build.");
+    }
+
     const tokenResponse = await requestJson<{
       access_token?: string;
       token_type?: string;
       expires_in?: number;
       refresh_token?: string;
-    }>("https://api.vercel.com/v2/oauth/access_token", {
+    }>(oauth.tokenEndpoint, {
       method: "POST",
       body: {
         code,
-        client_id: clientId,
-        client_secret: clientSecret || undefined,
+        client_id: oauth.clientId,
+        client_secret: oauth.clientSecret || undefined,
         redirect_uri: callback.redirectUri,
         grant_type: "authorization_code",
-        code_verifier: pkce.verifier
+        code_verifier: pkce?.verifier
       }
     });
 
@@ -229,21 +289,11 @@ export class VercelAdapter implements DeploymentProviderAdapter {
       projectIds.map(async (projectId) => {
         const endpoint = `https://api.vercel.com/v6/deployments?projectId=${encodeURIComponent(projectId)}&limit=8`;
         const response = await safeApiRequest<VercelDeploymentsResponse>(endpoint, token);
-        const deployments = (response.deployments ?? []).map((deployment) => mapDeployment(projectId, deployment));
-
-        const byEnvironment = new Map<string, DeploymentSummary>();
-        for (const deployment of deployments) {
-          const existing = byEnvironment.get(deployment.environment);
-          if (!existing || existing.updatedAt < deployment.updatedAt) {
-            byEnvironment.set(deployment.environment, deployment);
-          }
-        }
-
-        return [...byEnvironment.values()];
+        return (response.deployments ?? []).map((deployment) => mapDeployment(projectId, deployment));
       })
     );
 
-    return results.flat();
+    return results.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   public async getDeploymentDetails(deploymentId: string): Promise<DeploymentDetails> {

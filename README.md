@@ -4,73 +4,95 @@ Deployify is a VS Code extension that surfaces deployment status across multiple
 
 ## Features
 
-- Aggregates deployment info for Vercel and Netlify
-- Shows project and environment status in a native VS Code Activity Bar tree
-- Supports `workspace-linked` scope and `all-account` scope
-- Polls every 45 seconds by default with backoff on provider errors
-- Sends notifications on first transition to failed deployments
-- Opens deployment and dashboard URLs from tree actions
-- Stores provider sessions in VS Code `SecretStorage`
+- First-run onboarding in the Deployments view with one-click connect actions
+- OAuth connect flow for Vercel and Netlify (no end-user settings required)
+- AWS Amplify integration using your existing AWS credentials
+- Native VS Code Activity Bar tree for projects and environments
+- Environment grouping with recent deployment history under each project
+- Workspace-linked projects and all-account projects shown together
+- Root sections default to collapsed; expanding one collapses the others
+- Auto-refresh polling with backoff on provider errors
+- Failure transition notifications
+- Deployment details panel and direct links to provider dashboards
+- Credentials stored in VS Code `SecretStorage`
 
 ## Commands
 
 - `Deployify: Connect Provider`
+- `Deployify: Connect Vercel`
+- `Deployify: Connect Netlify`
+- `Deployify: Connect AWS Amplify`
 - `Deployify: Disconnect Provider`
 - `Deployify: Refresh`
-- `Deployify: Toggle Scope`
 - `Deployify: Open Deployment`
 - `Deployify: Open Project Dashboard`
 - `Deployify: View Details`
 - `Deployify: Link Workspace Project`
 - `Deployify: Unlink Workspace Project`
 
-## Provider Auth Setup
+## End-User Setup
 
-### Vercel OAuth
+1. Install the VSIX.
+2. Open the `Deployments` activity view.
+3. Click `Connect Vercel`, `Connect Netlify`, or `Connect AWS Amplify` from the welcome surface.
+4. Complete browser OAuth and return to VS Code.
 
-1. Create/configure a Vercel OAuth app.
-2. Add redirect URI pattern for this extension callback: `vscode://<publisher>.<extension>/deployify-auth/vercel`.
-3. Set these VS Code settings:
-   - `deployify.providers.vercel.authMode = oauth`
-   - `deployify.providers.vercel.oauthClientId = <your-client-id>`
-   - `deployify.providers.vercel.oauthClientSecret = <optional-if-required>`
-   - `deployify.providers.vercel.oauthScopes = project.read deployments.read`
-
-### Netlify OAuth
-
-1. Create/configure a Netlify OAuth app.
-2. Add redirect URI pattern: `vscode://<publisher>.<extension>/deployify-auth/netlify`.
-3. Set these VS Code settings:
-   - `deployify.providers.netlify.authMode = oauth`
-   - `deployify.providers.netlify.oauthClientId = <your-client-id>`
-   - `deployify.providers.netlify.oauthScopes = read_site`
-   - `deployify.providers.netlify.oauthGrantType = implicit` (recommended default)
-4. For code exchange flow, set:
-   - `deployify.providers.netlify.oauthGrantType = authorization_code`
-   - `deployify.providers.netlify.oauthClientSecret = <your-client-secret>`
-   - `deployify.providers.netlify.oauthTokenEndpoint = https://api.netlify.com/oauth/token`
-
-### Token fallback mode
-
-If you do not want OAuth app setup yet, set provider `authMode` to `token` and Deployify will use token prompt flow.
+No manual OAuth settings are required for end users.
 
 ## Settings
 
 - `deployify.pollIntervalSeconds` (default: `45`, min: `20`)
 - `deployify.notifyOnFailure` (default: `true`)
-- `deployify.defaultScope` (`workspace-linked` | `all-account`)
 - `deployify.providers.vercel.enabled`
-- `deployify.providers.vercel.authMode`
-- `deployify.providers.vercel.oauthClientId`
-- `deployify.providers.vercel.oauthClientSecret`
-- `deployify.providers.vercel.oauthScopes`
 - `deployify.providers.netlify.enabled`
-- `deployify.providers.netlify.authMode`
-- `deployify.providers.netlify.oauthClientId`
-- `deployify.providers.netlify.oauthClientSecret`
-- `deployify.providers.netlify.oauthScopes`
-- `deployify.providers.netlify.oauthGrantType`
-- `deployify.providers.netlify.oauthTokenEndpoint`
+- `deployify.providers.awsAmplify.enabled`
+- `deployify.providers.awsAmplify.region`
+- `deployify.providers.awsAmplify.profile`
+
+## Maintainer OAuth Configuration
+
+OAuth client IDs are resolved from `src/auth/oauthClientRegistry.ts` by extension ID.
+
+Important:
+
+- OAuth **client IDs are public** and are safe to ship in a VS Code extension.
+- OAuth **client secrets are private** and should never be shipped in extension code.
+- If a provider flow requires a secret for exchange, use a backend auth broker service.
+
+Before publishing under a new extension ID:
+
+1. Add provider OAuth client mappings for that extension ID in `src/auth/oauthClientRegistry.ts`.
+2. Register callback URIs in provider apps:
+   - `vscode://<extension-id>/deployify-auth/vercel`
+   - `vscode://<extension-id>/deployify-auth/netlify`
+3. Build/package and verify connect flow in a clean VS Code profile.
+
+Token fallback is kept as a hidden support path when OAuth is not enabled in a build.
+
+## Testing in VS Code Insiders
+
+Build/package:
+
+```bash
+npm install
+npm run compile
+npm test
+npm run package
+```
+
+Install the VSIX in Insiders:
+
+```bash
+code-insiders --install-extension /Users/rishabh/pgming/deployify/deployify-0.1.0.vsix --force
+```
+
+Open Insiders and validate:
+
+1. Deployments view first-run welcome appears with connect actions.
+2. Connect Vercel/Netlify and verify no settings prompt is required.
+3. Expand one root section at a time (`Workspace Projects`, `All Projects`, `Providers`).
+4. Expand a project and verify environment nodes show multiple recent deployments.
+5. Trigger refresh and verify statuses and failure notifications update in local timezone.
 
 ## Local Development
 
@@ -84,18 +106,7 @@ Run extension host:
 
 1. Open this workspace in VS Code.
 2. Press `F5` (`Run Deployify Extension` launch config).
-3. In the Extension Development Host window, open the `Deployments` activity bar view.
-
-## How To Test End-to-End
-
-1. In the dev host, run `Deployify: Connect Provider`.
-2. Pick Vercel or Netlify and complete browser auth.
-3. Verify provider node switches to `Connected`.
-4. Verify `Workspace Projects` / `All Projects` toggle works.
-5. Verify deployments render with state icons and URLs.
-6. Trigger `Deployify: Refresh` and confirm timestamps/state updates.
-7. Open a deployment and details panel from tree item context.
-8. Force a failed deployment in provider and confirm only one failure notification appears per transition.
+3. In the Extension Development Host window, open the `Deployments` activity view.
 
 ## Packaging
 
@@ -104,15 +115,3 @@ npm run package
 ```
 
 This produces a `.vsix` in the project root.
-
-## Provider Extensibility
-
-Providers implement `DeploymentProviderAdapter`.
-
-To add another provider:
-
-1. Add adapter file in `src/providers/`
-2. Register it in `src/extension.ts`
-3. Add provider settings in `package.json`
-
-The tree UI and polling pipeline do not need structural changes if adapter contract is preserved.

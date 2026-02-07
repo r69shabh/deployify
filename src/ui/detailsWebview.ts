@@ -12,7 +12,17 @@ function escapeHtml(value: string): string {
 
 function formatDate(iso: string): string {
   const date = new Date(iso);
-  return Number.isNaN(date.valueOf()) ? iso : date.toLocaleString();
+  return Number.isNaN(date.valueOf())
+    ? iso
+    : date.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZoneName: "short"
+      });
 }
 
 export class DetailsWebview {

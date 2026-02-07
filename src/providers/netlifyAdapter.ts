@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AuthManager, createPkcePair } from "../auth/authManager";
+import { ResolvedOAuthConfig, resolveOAuthConfig } from "../auth/oauthClientRegistry";
 import {
   DeploymentDetails,
   DeploymentProviderAdapter,
@@ -99,43 +100,96 @@ export class NetlifyAdapter implements DeploymentProviderAdapter {
   public readonly displayName = "Netlify";
 
   private readonly authManager: AuthManager;
+  private readonly extensionId: string;
 
-  public constructor(authManager: AuthManager) {
+  public constructor(authManager: AuthManager, extensionId: string) {
     this.authManager = authManager;
+    this.extensionId = extensionId;
   }
 
   public async authenticate() {
-    const configuration = vscode.workspace.getConfiguration("deployify.providers.netlify");
-    const authMode = configuration.get<"oauth" | "token">("authMode", "oauth");
-
-    if (authMode === "token") {
-      return this.authManager.beginDeviceLikeLogin(
-        this.id,
-        "https://app.netlify.com/user/applications#personal-access-tokens",
-        "Paste your Netlify personal access token"
-      );
+    const oauth = resolveOAuthConfig(this.extensionId, this.id);
+    if (!oauth) {
+      throw new Error("Netlify sign-in is not enabled in this build yet.");
     }
 
-    const clientId = configuration.get<string>("oauthClientId", "").trim();
-    const clientSecret = configuration.get<string>("oauthClientSecret", "").trim();
-    const scope = configuration.get<string>("oauthScopes", "read_site").trim();
-    const grantType = configuration.get<"implicit" | "authorization_code">("oauthGrantType", "implicit");
-    const tokenEndpoint = configuration.get<string>("oauthTokenEndpoint", "https://api.netlify.com/oauth/token").trim();
-
-    if (!clientId) {
-      throw new Error(
-        "Set deployify.providers.netlify.oauthClientId in settings before connecting Netlify with OAuth."
-      );
+    if (oauth.strategy === "broker") {
+      return this.authenticateViaBroker(oauth);
     }
 
-    const pkce = grantType === "authorization_code" ? createPkcePair() : undefined;
+    return this.authenticateDirect(oauth);
+  }
+
+  private async authenticateViaBroker(oauth: Extract<ResolvedOAuthConfig, { strategy: "broker" }>) {
     const callback = await this.authManager.beginOAuthFlow({
       provider: this.id,
-      authorizeEndpoint: "https://app.netlify.com/authorize",
+      authorizeEndpoint: oauth.startEndpoint,
       authorizeQuery: {
-        response_type: grantType === "authorization_code" ? "code" : "token",
-        client_id: clientId,
-        scope: scope || undefined,
+        provider: this.id,
+        extension_id: this.extensionId
+      }
+    });
+
+    const directToken = callback.fragmentParams.get("access_token") ?? callback.queryParams.get("access_token");
+    const expiresRaw = callback.fragmentParams.get("expires_in") ?? callback.queryParams.get("expires_in");
+
+    let accessToken = directToken;
+    let expiresInRaw = expiresRaw;
+
+    if (!accessToken) {
+      const brokerCode = callback.queryParams.get("broker_code") ?? callback.queryParams.get("code");
+      if (!brokerCode) {
+        throw new Error("Netlify broker auth callback did not return an access token or broker code.");
+      }
+
+      const exchange = await requestJson<{
+        access_token?: string;
+        expires_in?: number | string;
+        account_label?: string;
+      }>(oauth.exchangeEndpoint, {
+        method: "POST",
+        body: {
+          provider: this.id,
+          broker_code: brokerCode,
+          code: brokerCode,
+          redirect_uri: callback.redirectUri,
+          extension_id: this.extensionId
+        }
+      });
+
+      accessToken = exchange.access_token ?? null;
+      expiresInRaw = exchange.expires_in === undefined ? null : String(exchange.expires_in);
+    }
+
+    if (!accessToken) {
+      throw new Error("Netlify broker auth did not return an access token.");
+    }
+
+    const createdAt = new Date();
+    const expiresIn = expiresInRaw ? Number.parseInt(expiresInRaw, 10) : Number.NaN;
+    const session = {
+      provider: this.id,
+      accessToken,
+      createdAt: createdAt.toISOString(),
+      expiresAt: Number.isFinite(expiresIn)
+        ? new Date(createdAt.getTime() + expiresIn * 1000).toISOString()
+        : undefined
+    };
+
+    await this.authManager.setSession(session);
+    return session;
+  }
+
+  private async authenticateDirect(oauth: Extract<ResolvedOAuthConfig, { strategy: "direct" }>) {
+
+    const pkce = oauth.usePkce ? createPkcePair() : undefined;
+    const callback = await this.authManager.beginOAuthFlow({
+      provider: this.id,
+      authorizeEndpoint: oauth.authorizeEndpoint,
+      authorizeQuery: {
+        response_type: oauth.responseType,
+        client_id: oauth.clientId,
+        scope: oauth.scope || undefined,
         code_challenge: pkce?.challenge,
         code_challenge_method: pkce?.method
       }
@@ -144,25 +198,26 @@ export class NetlifyAdapter implements DeploymentProviderAdapter {
     let accessToken = callback.fragmentParams.get("access_token") ?? callback.queryParams.get("access_token");
     let expiresInRaw = callback.fragmentParams.get("expires_in") ?? callback.queryParams.get("expires_in");
 
-    if (!accessToken && grantType === "authorization_code") {
+    if (!accessToken && oauth.responseType === "code") {
       const code = callback.queryParams.get("code");
       if (!code) {
         throw new Error("Netlify OAuth callback did not return an access token or authorization code.");
       }
 
-      if (!clientSecret) {
-        throw new Error(
-          "Set deployify.providers.netlify.oauthClientSecret for authorization_code flow, or switch oauthGrantType to implicit."
-        );
+      if (!oauth.tokenEndpoint) {
+        throw new Error("Netlify OAuth token endpoint is not configured in this build.");
       }
 
       const body = new URLSearchParams({
         grant_type: "authorization_code",
         code,
-        client_id: clientId,
-        client_secret: clientSecret,
+        client_id: oauth.clientId,
         redirect_uri: callback.redirectUri
       });
+
+      if (oauth.clientSecret) {
+        body.set("client_secret", oauth.clientSecret);
+      }
 
       if (pkce?.verifier) {
         body.set("code_verifier", pkce.verifier);
@@ -171,12 +226,9 @@ export class NetlifyAdapter implements DeploymentProviderAdapter {
       const tokenResponse = await requestJson<{
         access_token?: string;
         expires_in?: number | string;
-      }>(tokenEndpoint, {
+      }>(oauth.tokenEndpoint, {
         method: "POST",
-        rawBody: body.toString(),
-        headers: {
-          "content-type": "application/x-www-form-urlencoded"
-        }
+        rawBody: body.toString()
       });
 
       accessToken = tokenResponse.access_token ?? null;
@@ -239,21 +291,11 @@ export class NetlifyAdapter implements DeploymentProviderAdapter {
       projectIds.map(async (projectId) => {
         const endpoint = `https://api.netlify.com/api/v1/sites/${encodeURIComponent(projectId)}/deploys?per_page=8`;
         const response = await safeApiRequest<Array<Record<string, unknown>>>(endpoint, token);
-        const mapped = response.map((deploy) => mapDeploy(projectId, deploy));
-
-        const byEnvironment = new Map<string, DeploymentSummary>();
-        for (const deployment of mapped) {
-          const existing = byEnvironment.get(deployment.environment);
-          if (!existing || existing.updatedAt < deployment.updatedAt) {
-            byEnvironment.set(deployment.environment, deployment);
-          }
-        }
-
-        return [...byEnvironment.values()];
+        return response.map((deploy) => mapDeploy(projectId, deploy));
       })
     );
 
-    return all.flat();
+    return all.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   public async getDeploymentDetails(deploymentId: string): Promise<DeploymentDetails> {

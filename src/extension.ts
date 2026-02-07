@@ -1,22 +1,24 @@
 import * as vscode from "vscode";
 import { AuthManager } from "./auth/authManager";
+import { getTokenFallbackConfig, isSupportedProviderId } from "./auth/oauthClientRegistry";
 import { DeploymentStore } from "./core/deploymentStore";
 import { NotificationService } from "./core/notificationService";
 import { PollingScheduler } from "./core/pollingScheduler";
 import { ProviderRegistry } from "./core/providerRegistry";
-import { DeploymentProviderAdapter, DeploymentSummary, HostedProject, ProjectScope, ProviderFetchResult } from "./core/types";
+import {
+  DeploymentProviderAdapter,
+  DeploymentStoreSnapshot,
+  DeploymentSummary,
+  HostedProject,
+  ProviderFetchResult
+} from "./core/types";
 import { NetlifyAdapter } from "./providers/netlifyAdapter";
 import { VercelAdapter } from "./providers/vercelAdapter";
+import { AwsAmplifyAdapter } from "./providers/awsAmplifyAdapter";
 import { DeploymentsTreeNode, DeploymentsTreeProvider } from "./ui/deploymentsTreeProvider";
 import { DetailsWebview } from "./ui/detailsWebview";
 import { DeploymentsStatusBar } from "./ui/statusBar";
 import { ProjectLinkService } from "./workspace/projectLinkService";
-
-const SCOPE_STATE_KEY = "deployify.scopeMode";
-
-function getConfiguredScopeMode(): ProjectScope["mode"] {
-  return vscode.workspace.getConfiguration("deployify").get<ProjectScope["mode"]>("defaultScope", "workspace-linked");
-}
 
 function getPollIntervalSeconds(): number {
   return vscode.workspace.getConfiguration("deployify").get<number>("pollIntervalSeconds", 45);
@@ -73,41 +75,84 @@ async function pickDeployment(deployments: DeploymentSummary[], title: string): 
   return selected?.deployment;
 }
 
+function providerIdFromNode(node?: DeploymentsTreeNode | string): string | undefined {
+  if (typeof node === "string") {
+    return node;
+  }
+
+  if (node?.kind === "provider") {
+    return node.provider.provider;
+  }
+
+  return undefined;
+}
+
+async function setContext(key: string, value: boolean): Promise<void> {
+  await vscode.commands.executeCommand("setContext", key, value);
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const authManager = new AuthManager(context.secrets, context.extension.id);
   context.subscriptions.push(authManager);
+
   const providerRegistry = new ProviderRegistry();
   const projectLinkService = new ProjectLinkService(context.globalState);
   const notificationService = new NotificationService();
   const detailsWebview = new DetailsWebview();
 
-  const vercelAdapter = new VercelAdapter(authManager);
-  const netlifyAdapter = new NetlifyAdapter(authManager);
+  const vercelAdapter = new VercelAdapter(authManager, context.extension.id);
+  const netlifyAdapter = new NetlifyAdapter(authManager, context.extension.id);
+  const awsAmplifyAdapter = new AwsAmplifyAdapter(authManager);
 
   providerRegistry.register(vercelAdapter);
   providerRegistry.register(netlifyAdapter);
+  providerRegistry.register(awsAmplifyAdapter);
 
   const store = new DeploymentStore(
     providerRegistry.getAll().map((adapter) => ({ provider: adapter.id, displayName: adapter.displayName }))
   );
 
-  const initialScopeMode = context.workspaceState.get<ProjectScope["mode"]>(SCOPE_STATE_KEY) ?? getConfiguredScopeMode();
-  let scope: ProjectScope = { mode: initialScopeMode };
-
-  const treeProvider = new DeploymentsTreeProvider(store, projectLinkService, () => scope);
+  const treeProvider = new DeploymentsTreeProvider(store, projectLinkService);
   const statusBar = new DeploymentsStatusBar();
 
   statusBar.show();
 
-  context.subscriptions.push(
-    statusBar,
-    vscode.window.registerTreeDataProvider("deployify.deployments", treeProvider)
-  );
+  const treeView = vscode.window.createTreeView("deployify.deployments", {
+    treeDataProvider: treeProvider
+  });
+
+  context.subscriptions.push(statusBar, treeView);
+
+  context.subscriptions.push(treeView.onDidExpandElement((event) => {
+    if (event.element.kind === "workspace-root" || event.element.kind === "all-root" || event.element.kind === "providers-root") {
+      treeProvider.setExpandedRoot(event.element.kind);
+    }
+  }));
+
+  context.subscriptions.push(treeView.onDidCollapseElement((event) => {
+    if (event.element.kind === "workspace-root" || event.element.kind === "all-root" || event.element.kind === "providers-root") {
+      treeProvider.clearExpandedRoot(event.element.kind);
+    }
+  }));
+
+  const updateOnboardingContexts = async (snapshot: DeploymentStoreSnapshot): Promise<void> => {
+    const hasConnectedProvider = snapshot.providers.some((provider) => provider.connected);
+    const hasAnyProjects = snapshot.projects.length > 0;
+    const workspaceProjects = await projectLinkService.filterProjectsForScope(snapshot.projects, { mode: "workspace-linked" });
+    const hasWorkspaceProjects = workspaceProjects.length > 0;
+
+    await Promise.all([
+      setContext("deployify.hasConnectedProvider", hasConnectedProvider),
+      setContext("deployify.hasAnyProjects", hasAnyProjects),
+      setContext("deployify.hasWorkspaceProjects", hasWorkspaceProjects)
+    ]);
+  };
 
   store.onDidUpdate((update) => {
     treeProvider.refresh();
     statusBar.update(update.current);
     notificationService.handleStoreUpdate(update);
+    void updateOnboardingContexts(update.current);
   });
 
   const refreshProviders = async (): Promise<void> => {
@@ -175,26 +220,114 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand(command, callback));
   };
 
-  register("deployify.connectProvider", async () => {
-    const adapter = await pickAdapter(providerRegistry.getEnabled(), "Connect provider");
+  const connectWithToken = async (providerId: string): Promise<void> => {
+    if (!isSupportedProviderId(providerId)) {
+      vscode.window.showWarningMessage(`Deployify: token fallback is unavailable for provider ${providerId}.`);
+      return;
+    }
+
+    const fallback = getTokenFallbackConfig(providerId);
+    if (!fallback) {
+      vscode.window.showWarningMessage(`Deployify: token fallback is unavailable for provider ${providerId}.`);
+      return;
+    }
+
+    await authManager.beginDeviceLikeLogin(providerId, fallback.verificationUrl, fallback.tokenHint);
+    vscode.window.showInformationMessage(`Deployify: connected ${providerId} using token fallback.`);
+    await scheduler.triggerNow();
+  };
+
+  const connectAdapter = async (adapter: DeploymentProviderAdapter): Promise<void> => {
+    try {
+      await adapter.authenticate();
+      vscode.window.showInformationMessage(`Deployify: connected ${adapter.displayName}.`);
+      await scheduler.triggerNow();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to connect provider.";
+      const oauthUnavailable = message.toLowerCase().includes("not enabled in this build");
+
+      if (oauthUnavailable && isSupportedProviderId(adapter.id)) {
+        try {
+          await connectWithToken(adapter.id);
+        } catch (fallbackError) {
+          const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : "Token fallback failed.";
+          vscode.window.showErrorMessage(`Deployify: ${fallbackMessage}`);
+        }
+        return;
+      }
+
+      vscode.window.showErrorMessage(`Deployify: ${message}`);
+    }
+  };
+
+  const connectProviderById = async (providerId: string): Promise<void> => {
+    const adapter = providerRegistry.get(providerId);
+
+    if (!adapter) {
+      vscode.window.showWarningMessage(`Deployify: provider ${providerId} is not registered.`);
+      return;
+    }
+
+    await connectAdapter(adapter);
+  };
+
+  register("deployify.connectProvider", async (node?: DeploymentsTreeNode) => {
+    const nodeProviderId = providerIdFromNode(node);
+    const adapter = nodeProviderId
+      ? providerRegistry.get(nodeProviderId)
+      : await pickAdapter(providerRegistry.getEnabled(), "Connect provider");
+
     if (!adapter) {
       vscode.window.showInformationMessage("Deployify: no provider selected.");
       return;
     }
 
-    try {
-      await adapter.authenticate();
-      vscode.window.showInformationMessage(`Deployify: connected ${adapter.displayName}.`);
-      await scheduler.triggerNow();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to connect provider.";
-      vscode.window.showErrorMessage(`Deployify: ${message}`);
-    }
+    await connectAdapter(adapter);
   });
 
-  register("deployify.disconnectProvider", async () => {
-    const connectedIds = await authManager.getConnectedProviderIds(providerRegistry.getAll().map((adapter) => adapter.id));
-    const adapter = await pickAdapter(providerRegistry.getConnected(connectedIds), "Disconnect provider");
+  register("deployify.connectVercel", async () => {
+    await connectProviderById("vercel");
+  });
+
+  register("deployify.connectNetlify", async () => {
+    await connectProviderById("netlify");
+  });
+
+  register("deployify.connectAwsAmplify", async () => {
+    await connectProviderById("awsAmplify");
+  });
+
+  register("deployify.connectProviderWithToken", async (node?: DeploymentsTreeNode | string) => {
+    const providerId = providerIdFromNode(node);
+
+    if (!providerId) {
+      const selection = await vscode.window.showQuickPick(
+        ["vercel", "netlify"],
+        { title: "Connect provider with token fallback" }
+      );
+
+      if (!selection) {
+        return;
+      }
+
+      await connectWithToken(selection);
+      return;
+    }
+
+    await connectWithToken(providerId);
+  });
+
+  register("deployify.disconnectProvider", async (node?: DeploymentsTreeNode) => {
+    const nodeProviderId = providerIdFromNode(node);
+
+    let adapter: DeploymentProviderAdapter | undefined;
+    if (nodeProviderId) {
+      adapter = providerRegistry.get(nodeProviderId);
+    } else {
+      const connectedIds = await authManager.getConnectedProviderIds(providerRegistry.getAll().map((candidate) => candidate.id));
+      adapter = await pickAdapter(providerRegistry.getConnected(connectedIds), "Disconnect provider");
+    }
 
     if (!adapter) {
       vscode.window.showInformationMessage("Deployify: no connected provider selected.");
@@ -213,17 +346,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } catch {
       vscode.window.showWarningMessage("Deployify refreshed with provider errors. See Providers node for details.");
     }
-  });
-
-  register("deployify.toggleScope", async () => {
-    scope = {
-      mode: scope.mode === "workspace-linked" ? "all-account" : "workspace-linked"
-    };
-
-    await context.workspaceState.update(SCOPE_STATE_KEY, scope.mode);
-    treeProvider.refresh();
-
-    vscode.window.setStatusBarMessage(`Deployify scope: ${scope.mode}`, 3000);
   });
 
   register("deployify.openDeployment", async (node?: DeploymentsTreeNode) => {
@@ -309,6 +431,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 
     treeProvider.refresh();
+    await updateOnboardingContexts(store.getSnapshot());
     vscode.window.showInformationMessage(`Deployify: linked ${project.name}.`);
   });
 
@@ -335,6 +458,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     await projectLinkService.unlinkProject(selection.link.provider, selection.link.projectId);
     treeProvider.refresh();
+    await updateOnboardingContexts(store.getSnapshot());
     vscode.window.showInformationMessage(`Deployify: unlinked ${selection.link.projectName}.`);
   });
 
@@ -346,7 +470,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       if (
         event.affectsConfiguration("deployify.providers.vercel.enabled") ||
-        event.affectsConfiguration("deployify.providers.netlify.enabled")
+        event.affectsConfiguration("deployify.providers.netlify.enabled") ||
+        event.affectsConfiguration("deployify.providers.awsAmplify.enabled") ||
+        event.affectsConfiguration("deployify.providers.awsAmplify.region") ||
+        event.affectsConfiguration("deployify.providers.awsAmplify.profile")
       ) {
         void scheduler.triggerNow();
       }
@@ -356,6 +483,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
+
+  await updateOnboardingContexts(store.getSnapshot());
 
   try {
     await scheduler.triggerNow();

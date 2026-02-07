@@ -14,7 +14,7 @@ function projectKey(provider: ProviderId, projectId: string): string {
 }
 
 function deploymentKey(summary: DeploymentSummary): string {
-  return `${summary.provider}:${summary.projectId}:${summary.environment}`;
+  return `${summary.provider}:${summary.projectId}:${summary.deploymentId}`;
 }
 
 export class DeploymentStore {
@@ -112,6 +112,11 @@ export class DeploymentStore {
       const projectCompare = a.projectId.localeCompare(b.projectId);
       if (projectCompare !== 0) {
         return projectCompare;
+      }
+
+      const environmentCompare = a.environment.localeCompare(b.environment);
+      if (environmentCompare !== 0) {
+        return environmentCompare;
       }
 
       return b.updatedAt.localeCompare(a.updatedAt);
