@@ -1,9 +1,9 @@
 {
-  "name": "deployify",
-  "displayName": "Deployify",
+  "name": "deploify",
+  "displayName": "Deploify",
   "description": "Unified deployment status in VS Code for Vercel, Netlify, and more.",
   "version": "0.1.0",
-  "publisher": "r69shabh",
+  "publisher": "r69",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
