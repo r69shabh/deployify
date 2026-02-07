@@ -1,0 +1,31 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="128" height="128" rx="24" fill="url(#gradient)"/>
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#764ba2"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Rocket Body -->
+  <path d="M64 20L58 35L52 50H76L70 35L64 20Z" fill="white" opacity="0.95"/>
+  <path d="M52 50L48 70L44 85H84L80 70L76 50H52Z" fill="white" opacity="0.95"/>
+  
+  <!-- Rocket Window -->
+  <circle cx="64" cy="60" r="8" fill="#667eea" opacity="0.8"/>
+  
+  <!-- Rocket Fins -->
+  <path d="M48 70L40 90L44 85L48 70Z" fill="white" opacity="0.9"/>
+  <path d="M80 70L88 90L84 85L80 70Z" fill="white" opacity="0.9"/>
+  
+  <!-- Rocket Flames -->
+  <path d="M50 85L48 95L52 108L56 100L50 85Z" fill="#fbbf24" opacity="0.9"/>
+  <path d="M64 85L62 100L64 110L66 100L64 85Z" fill="#f59e0b" opacity="0.95"/>
+  <path d="M78 85L76 95L72 108L76 100L78 85Z" fill="#fbbf24" opacity="0.9"/>
+  
+  <!-- Stars/Sparkles -->
+  <circle cx="30" cy="35" r="2" fill="white" opacity="0.7"/>
+  <circle cx="95" cy="40" r="2" fill="white" opacity="0.7"/>
+  <circle cx="25" cy="60" r="1.5" fill="white" opacity="0.6"/>
+  <circle cx="100" cy="65" r="1.5" fill="white" opacity="0.6"/>
+</svg>
