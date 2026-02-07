@@ -1,0 +1,239 @@
+{
+  "name": "deployify",
+  "displayName": "Deployify",
+  "description": "Unified deployment status in VS Code for Vercel, Netlify, and more.",
+  "version": "0.1.0",
+  "publisher": "rishabh",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:deployify.deployments",
+    "onCommand:deployify.refresh",
+    "onCommand:deployify.connectProvider",
+    "onCommand:deployify.disconnectProvider",
+    "onCommand:deployify.toggleScope",
+    "onCommand:deployify.openDeployment",
+    "onCommand:deployify.openProject",
+    "onCommand:deployify.viewDetails",
+    "onCommand:deployify.linkWorkspaceProject",
+    "onCommand:deployify.unlinkWorkspaceProject"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deployify",
+          "title": "Deployments",
+          "icon": "media/rocket.svg"
+        }
+      ]
+    },
+    "views": {
+      "deployify": [
+        {
+          "id": "deployify.deployments",
+          "name": "Deployments"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "deployify.connectProvider",
+        "title": "Deployify: Connect Provider"
+      },
+      {
+        "command": "deployify.disconnectProvider",
+        "title": "Deployify: Disconnect Provider"
+      },
+      {
+        "command": "deployify.refresh",
+        "title": "Deployify: Refresh"
+      },
+      {
+        "command": "deployify.toggleScope",
+        "title": "Deployify: Toggle Scope"
+      },
+      {
+        "command": "deployify.openDeployment",
+        "title": "Deployify: Open Deployment"
+      },
+      {
+        "command": "deployify.openProject",
+        "title": "Deployify: Open Project Dashboard"
+      },
+      {
+        "command": "deployify.viewDetails",
+        "title": "Deployify: View Details"
+      },
+      {
+        "command": "deployify.linkWorkspaceProject",
+        "title": "Deployify: Link Workspace Project"
+      },
+      {
+        "command": "deployify.unlinkWorkspaceProject",
+        "title": "Deployify: Unlink Workspace Project"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "deployify.refresh",
+          "when": "view == deployify.deployments",
+          "group": "navigation@1"
+        },
+        {
+          "command": "deployify.connectProvider",
+          "when": "view == deployify.deployments",
+          "group": "navigation@2"
+        },
+        {
+          "command": "deployify.toggleScope",
+          "when": "view == deployify.deployments",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "deployify.openDeployment",
+          "when": "view == deployify.deployments && viewItem == deployify.deployment",
+          "group": "inline@1"
+        },
+        {
+          "command": "deployify.viewDetails",
+          "when": "view == deployify.deployments && viewItem == deployify.deployment",
+          "group": "inline@2"
+        },
+        {
+          "command": "deployify.openProject",
+          "when": "view == deployify.deployments && viewItem == deployify.project",
+          "group": "inline@1"
+        },
+        {
+          "command": "deployify.linkWorkspaceProject",
+          "when": "view == deployify.deployments",
+          "group": "navigation@10"
+        },
+        {
+          "command": "deployify.unlinkWorkspaceProject",
+          "when": "view == deployify.deployments",
+          "group": "navigation@11"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Deployify",
+      "properties": {
+        "deployify.pollIntervalSeconds": {
+          "type": "number",
+          "default": 45,
+          "minimum": 20,
+          "description": "Refresh interval in seconds for deployment polling."
+        },
+        "deployify.notifyOnFailure": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show VS Code notifications when deployments transition to failed."
+        },
+        "deployify.defaultScope": {
+          "type": "string",
+          "default": "workspace-linked",
+          "enum": [
+            "workspace-linked",
+            "all-account"
+          ],
+          "description": "Default project scope shown in the Deployments view."
+        },
+        "deployify.providers.vercel.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Vercel provider integration."
+        },
+        "deployify.providers.vercel.authMode": {
+          "type": "string",
+          "default": "oauth",
+          "enum": [
+            "oauth",
+            "token"
+          ],
+          "description": "Authentication mode for Vercel provider."
+        },
+        "deployify.providers.vercel.oauthClientId": {
+          "type": "string",
+          "default": "",
+          "description": "Vercel OAuth client ID used when auth mode is oauth."
+        },
+        "deployify.providers.vercel.oauthClientSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Vercel OAuth client secret used for token exchange (if required by your app setup)."
+        },
+        "deployify.providers.vercel.oauthScopes": {
+          "type": "string",
+          "default": "project.read deployments.read",
+          "description": "Space-delimited OAuth scopes requested from Vercel."
+        },
+        "deployify.providers.netlify.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Netlify provider integration."
+        },
+        "deployify.providers.netlify.authMode": {
+          "type": "string",
+          "default": "oauth",
+          "enum": [
+            "oauth",
+            "token"
+          ],
+          "description": "Authentication mode for Netlify provider."
+        },
+        "deployify.providers.netlify.oauthClientId": {
+          "type": "string",
+          "default": "",
+          "description": "Netlify OAuth client ID used when auth mode is oauth."
+        },
+        "deployify.providers.netlify.oauthClientSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Netlify OAuth client secret used for authorization_code token exchange."
+        },
+        "deployify.providers.netlify.oauthScopes": {
+          "type": "string",
+          "default": "read_site",
+          "description": "Space-delimited OAuth scopes requested from Netlify."
+        },
+        "deployify.providers.netlify.oauthGrantType": {
+          "type": "string",
+          "default": "implicit",
+          "enum": [
+            "implicit",
+            "authorization_code"
+          ],
+          "description": "Netlify OAuth grant type. implicit returns token in callback; authorization_code exchanges code for token."
+        },
+        "deployify.providers.netlify.oauthTokenEndpoint": {
+          "type": "string",
+          "default": "https://api.netlify.com/oauth/token",
+          "description": "Netlify OAuth token endpoint used for authorization_code exchange."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/**/*.test.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.7.2"
+  }
+}
